@@ -216,7 +216,7 @@ def save_entry_record(client_id: Optional[int], client_name: str, whatsapp: str,
     """
     # 1. Total Amount = (B&W + Color) * rate
     total_pages = bw_pages + color_pages
-    total_amount = (total_pages * rate) if total_pages > 0 else rate
+    total_amount = total_pages * rate
 
     # 2. Net Amount = Total - deposit
     net_amount = total_amount - deposit
