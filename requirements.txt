@@ -2,3 +2,5 @@
 pywhatkit>=5.4
 Pillow>=9.0.0
 PyAutoGUI>=0.9.54
+tkcalendar==1.6.1
+reportlab>=4.0.0

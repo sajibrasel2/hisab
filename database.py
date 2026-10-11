@@ -273,13 +273,205 @@ def save_entry_record(client_id: Optional[int], client_name: str, whatsapp: str,
     }
 
 
+def delete_entry_and_fix_due(entry_id: int) -> bool:
+    """
+    Deletes a daily_entry row from DB and recalculates the entire due chain
+    for that client so due_balance stays accurate.
+
+    Steps:
+    1. Load the entry to delete — get client_id and its previous_due snapshot.
+    2. Delete the row from daily_entries.
+    3. Re-fetch all remaining entries for this client ordered by id ASC.
+    4. Rebuild the due chain: starting from 0, walk each entry and update
+       previous_due / new_due in DB.
+    5. Update clients.due_balance to the final new_due (or 0 if no entries left).
+
+    Returns True on success, False if entry not found.
+    """
+    with get_connection() as conn:
+        cursor = conn.cursor()
+
+        # 1. Load the entry
+        cursor.execute("SELECT * FROM daily_entries WHERE id = ?", (entry_id,))
+        entry = cursor.fetchone()
+        if not entry:
+            return False
+
+        client_id = entry["client_id"]
+
+        # 2. Delete the entry
+        cursor.execute("DELETE FROM daily_entries WHERE id = ?", (entry_id,))
+        conn.commit()
+
+        # 3. If no client linked, nothing more to do
+        if not client_id:
+            return True
+
+        # 4. Re-fetch remaining entries for this client, oldest first
+        cursor.execute(
+            "SELECT * FROM daily_entries WHERE client_id = ? ORDER BY id ASC",
+            (client_id,)
+        )
+        remaining = cursor.fetchall()
+
+        # 5. Rebuild the entire due chain from scratch
+        running_due = 0.0
+        for row in remaining:
+            net_amount = float(row["net_amount"])
+            new_due = running_due + net_amount
+            cursor.execute("""
+                UPDATE daily_entries
+                SET previous_due = ?, new_due = ?
+                WHERE id = ?
+            """, (running_due, new_due, row["id"]))
+            running_due = new_due
+
+        # 6. Update client due_balance to final value (0 if no entries remain)
+        cursor.execute("""
+            UPDATE clients
+            SET due_balance = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """, (running_due, client_id))
+
+        conn.commit()
+        return True
+
+
+def update_entry_and_fix_due(entry_id: int, entry_date: str, bw_pages: int,
+                              color_pages: int, rate: float, deposit: float) -> bool:
+    """
+    Updates an existing daily_entry row with new values and rebuilds
+    the entire due chain for that client.
+
+    Steps:
+    1. Load entry to find client_id.
+    2. Recalculate total_pages, total_amount, net_amount from new values.
+    3. Update the entry row in DB (keeping previous_due/new_due temporarily stale).
+    4. Rebuild the full due chain for the client from oldest entry to newest.
+    5. Update clients.due_balance.
+
+    Returns True on success, False if entry not found.
+    """
+    with get_connection() as conn:
+        cursor = conn.cursor()
+
+        # 1. Load existing entry
+        cursor.execute("SELECT * FROM daily_entries WHERE id = ?", (entry_id,))
+        entry = cursor.fetchone()
+        if not entry:
+            return False
+
+        client_id = entry["client_id"]
+
+        # 2. Recalculate
+        total_pages = bw_pages + color_pages
+        total_amount = total_pages * rate
+        net_amount = total_amount - deposit
+
+        # 3. Update the row (previous_due/new_due will be fixed in step 4)
+        cursor.execute("""
+            UPDATE daily_entries
+            SET entry_date = ?, bw_pages = ?, color_pages = ?,
+                total_pages = ?, rate = ?, total_amount = ?,
+                deposit = ?, net_amount = ?
+            WHERE id = ?
+        """, (entry_date, bw_pages, color_pages, total_pages,
+              rate, total_amount, deposit, net_amount, entry_id))
+        conn.commit()
+
+        # 4. Rebuild due chain for this client
+        if client_id:
+            cursor.execute(
+                "SELECT * FROM daily_entries WHERE client_id = ? ORDER BY id ASC",
+                (client_id,)
+            )
+            all_entries = cursor.fetchall()
+
+            running_due = 0.0
+            for row in all_entries:
+                row_net = float(row["net_amount"])
+                new_due = running_due + row_net
+                cursor.execute("""
+                    UPDATE daily_entries
+                    SET previous_due = ?, new_due = ?
+                    WHERE id = ?
+                """, (running_due, new_due, row["id"]))
+                running_due = new_due
+
+            # 5. Update client due_balance
+            cursor.execute("""
+                UPDATE clients
+                SET due_balance = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, (running_due, client_id))
+
+            conn.commit()
+
+        return True
+
+
 def get_client_entries(client_id: int) -> List[Dict[str, Any]]:
-    """Retrieve all entries for a specific client."""
+    """Retrieve all entries for a specific client, newest first."""
     if not client_id:
         return []
     with get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM daily_entries WHERE client_id = ? ORDER BY id DESC", (client_id,))
+        cursor.execute(
+            "SELECT * FROM daily_entries WHERE client_id = ? ORDER BY id ASC",
+            (client_id,)
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def get_entries_by_date_range(client_id: Optional[int],
+                               date_from: str, date_to: str) -> List[Dict[str, Any]]:
+    """
+    Retrieve entries filtered by date range (DD-MM-YYYY format stored as TEXT).
+    Converts DD-MM-YYYY to YYYY-MM-DD for proper SQLite text comparison.
+    If client_id is None, returns entries for ALL clients in that range.
+    """
+    def to_iso(d: str) -> str:
+        """Convert DD-MM-YYYY to YYYY-MM-DD for correct string sort."""
+        try:
+            parts = d.strip().split("-")
+            if len(parts) == 3:
+                return f"{parts[2]}-{parts[1]}-{parts[0]}"
+        except Exception:
+            pass
+        return d
+
+    iso_from = to_iso(date_from)
+    iso_to = to_iso(date_to)
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+
+        if client_id:
+            cursor.execute("""
+                SELECT * FROM daily_entries
+                WHERE client_id = ?
+                  AND (
+                    CASE
+                      WHEN entry_date LIKE '__-__-____'
+                      THEN substr(entry_date,7,4)||'-'||substr(entry_date,4,2)||'-'||substr(entry_date,1,2)
+                      ELSE entry_date
+                    END
+                  ) BETWEEN ? AND ?
+                ORDER BY id ASC
+            """, (client_id, iso_from, iso_to))
+        else:
+            cursor.execute("""
+                SELECT * FROM daily_entries
+                WHERE (
+                    CASE
+                      WHEN entry_date LIKE '__-__-____'
+                      THEN substr(entry_date,7,4)||'-'||substr(entry_date,4,2)||'-'||substr(entry_date,1,2)
+                      ELSE entry_date
+                    END
+                  ) BETWEEN ? AND ?
+                ORDER BY id ASC
+            """, (iso_from, iso_to))
+
         return [dict(row) for row in cursor.fetchall()]
 
 
@@ -287,7 +479,26 @@ def get_all_clients() -> List[Dict[str, Any]]:
     """Retrieve all clients ordered by recent updates."""
     with get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM clients ORDER BY id DESC")
+        cursor.execute("SELECT * FROM clients ORDER BY updated_at DESC")
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def get_all_entries(limit: int = 500) -> List[Dict[str, Any]]:
+    """Retrieve all daily entries across clients, ordered by id ASC."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM daily_entries ORDER BY id ASC LIMIT ?", (limit,))
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def search_clients_by_name(query: str) -> List[Dict[str, Any]]:
+    """Search clients by name (partial match, case-insensitive)."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM clients WHERE name LIKE ? ORDER BY name ASC",
+            (f"%{query}%",)
+        )
         return [dict(row) for row in cursor.fetchall()]
 
 

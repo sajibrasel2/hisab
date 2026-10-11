@@ -10,14 +10,19 @@ Features:
     New Due      = Previous Due + Net Amount
 - SQLite Relational Ledger Persistence
 - 100% Mouse-Free Keyboard Data Entry Flow
-- Automated WhatsApp Due Notification Integration via pywhatkit
+- Client Browser modal with instant Single-Click selection & ledger history loading
+- Invoicing Engine: Printable HTML Bill, Professional PDF Bill (ReportLab), and WhatsApp Full Bill
+- Rich High-Contrast Row Color Tags (Red for Due added, Green for Deposit, Slate for Zero)
+- In-App Refresh Button (F5) & One-Click Desktop Shortcut Generator
 """
 
 import sys
 import os
 import datetime
+import subprocess
+import webbrowser
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 
 # Ensure UTF-8 output in Windows console if needed
 if sys.platform == "win32":
@@ -28,14 +33,40 @@ if sys.platform == "win32":
 
 import database
 import whatsapp_sender
+import bill_generator
+
+
+def create_desktop_shortcut() -> bool:
+    """Create a Windows desktop shortcut for Amar Hisab pointing to Amar_Hisab.bat."""
+    try:
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        bat_path = os.path.join(current_dir, "Amar_Hisab.bat")
+        desktop_dir = os.path.join(os.environ.get("USERPROFILE", ""), "Desktop")
+        if not os.path.exists(desktop_dir):
+            return False
+
+        shortcut_path = os.path.join(desktop_dir, "Amar Hisab.lnk")
+        ps_script = (
+            f'$ws = New-Object -ComObject WScript.Shell; '
+            f'$s = $ws.CreateShortcut("{shortcut_path}"); '
+            f'$s.TargetPath = "{bat_path}"; '
+            f'$s.WorkingDirectory = "{current_dir}"; '
+            f'$s.Description = "আমার হিসাব (Amar Hisab) - বিলিং সফটওয়্যার"; '
+            f'$s.Save()'
+        )
+        subprocess.run(["powershell", "-NoProfile", "-Command", ps_script], check=True, capture_output=True)
+        return True
+    except Exception as e:
+        print(f"Error creating shortcut: {e}")
+        return False
 
 
 class BillingApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("আমার হিসাব (Amar Hisab) - প্রফেশনাল বিলিং ও লেজার সফটওয়্যার")
-        self.root.geometry("1260x820")
-        self.root.minsize(1120, 720)
+        self.root.geometry("1140x800")
+        self.root.minsize(980, 680)
 
         # Initialize Database
         database.init_db()
@@ -45,6 +76,7 @@ class BillingApp:
         self.current_client_id = None
         self.current_client_name = ""
         self.current_client_whatsapp = ""
+        self.current_client_address = ""
         self.current_client_previous_due = 0.0
         self.invoice_number = self.generate_invoice_no()
 
@@ -75,7 +107,6 @@ class BillingApp:
     # ==============================================================
     def setup_styles(self):
         """Configure modern, corporate styles for ttk widgets."""
-        # Clean soft slate background
         self.root.configure(bg="#f8fafc")
 
         self.style = ttk.Style()
@@ -84,7 +115,7 @@ class BillingApp:
         # Color Tokens
         self.COLOR_BG = "#f8fafc"            # Soft Slate-50 background
         self.COLOR_CARD = "#ffffff"          # Crisp White
-        self.COLOR_BORDER = "#e2e8f0"        # Subtle Border
+        self.COLOR_BORDER = "#cbd5e1"        # Subtle Border
         self.COLOR_TEXT_MAIN = "#0f172a"     # Dark Slate-900
         self.COLOR_TEXT_MUTED = "#64748b"    # Slate-500
         self.COLOR_PRIMARY = "#2563eb"       # Royal Blue-600
@@ -97,55 +128,34 @@ class BillingApp:
         self.COLOR_DANGER_HOVER = "#ef4444"  # Red-500
         self.COLOR_SECONDARY = "#475569"     # Slate-600
         self.COLOR_SECONDARY_HOVER = "#64748b"
+        self.COLOR_PURPLE = "#7c3aed"        # Modern Violet
+        self.COLOR_PURPLE_HOVER = "#6d28d9"
 
-        # Card Container (TLabelframe)
-        self.style.configure(
-            "Card.TLabelframe",
-            background=self.COLOR_CARD,
-            bordercolor=self.COLOR_BORDER,
-            relief="solid",
-            borderwidth=1,
-            padding=10
-        )
-        self.style.configure(
-            "Card.TLabelframe.Label",
-            background=self.COLOR_CARD,
-            foreground="#1e3a8a",
-            font=("Segoe UI", 11, "bold")
-        )
+        # Frame & LabelFrame Styles
+        self.style.configure("Card.TLabelframe",
+                             background=self.COLOR_CARD,
+                             foreground=self.COLOR_PRIMARY,
+                             font=("Segoe UI", 10, "bold"),
+                             borderwidth=1,
+                             relief="solid")
+        self.style.configure("Card.TLabelframe.Label",
+                             background=self.COLOR_CARD,
+                             foreground="#1e3a8a",
+                             font=("Segoe UI", 10, "bold"))
 
-        # Standard Label
-        self.style.configure(
-            "TLabel",
-            background=self.COLOR_CARD,
-            foreground=self.COLOR_TEXT_MAIN,
-            font=("Segoe UI", 10)
-        )
-        self.style.configure(
-            "FieldLabel.TLabel",
-            background=self.COLOR_CARD,
-            foreground="#334155",
-            font=("Segoe UI", 9, "bold")
-        )
+        # Field Labels
+        self.style.configure("FieldLabel.TLabel",
+                             background=self.COLOR_CARD,
+                             foreground=self.COLOR_TEXT_MAIN,
+                             font=("Segoe UI", 9, "bold"))
 
-        # Modern Entry Styling
-        self.style.configure(
-            "TEntry",
-            fieldbackground="#ffffff",
-            foreground="#0f172a",
-            padding=5,
-            bordercolor=self.COLOR_BORDER,
-            lightcolor=self.COLOR_PRIMARY,
-            darkcolor=self.COLOR_BORDER
-        )
-
-        # Primary Button (Blue)
+        # Primary Button (Royal Blue)
         self.style.configure(
             "Primary.TButton",
-            font=("Segoe UI", 10, "bold"),
+            font=("Segoe UI", 9, "bold"),
             background=self.COLOR_PRIMARY,
             foreground="#ffffff",
-            padding=7,
+            padding=5,
             borderwidth=0,
             relief="flat",
             focuscolor="none"
@@ -153,13 +163,13 @@ class BillingApp:
         self.style.map("Primary.TButton",
                        background=[("active", self.COLOR_PRIMARY_HOVER), ("pressed", "#1e40af")])
 
-        # Success Button (Emerald)
+        # Success Button (Emerald Green)
         self.style.configure(
             "Success.TButton",
-            font=("Segoe UI", 10, "bold"),
+            font=("Segoe UI", 9, "bold"),
             background=self.COLOR_SUCCESS,
             foreground="#ffffff",
-            padding=7,
+            padding=5,
             borderwidth=0,
             relief="flat",
             focuscolor="none"
@@ -167,13 +177,13 @@ class BillingApp:
         self.style.map("Success.TButton",
                        background=[("active", self.COLOR_SUCCESS_HOVER), ("pressed", "#047857")])
 
-        # WhatsApp Button (Brand Green)
+        # WhatsApp Button (WhatsApp Green)
         self.style.configure(
             "WhatsApp.TButton",
-            font=("Segoe UI", 10, "bold"),
+            font=("Segoe UI", 9, "bold"),
             background=self.COLOR_WHATSAPP,
             foreground="#ffffff",
-            padding=7,
+            padding=5,
             borderwidth=0,
             relief="flat",
             focuscolor="none"
@@ -181,13 +191,27 @@ class BillingApp:
         self.style.map("WhatsApp.TButton",
                        background=[("active", self.COLOR_WHATSAPP_HOVER), ("pressed", "#15803d")])
 
-        # Danger Button (Red)
+        # Purple / Invoicing Button
+        self.style.configure(
+            "Purple.TButton",
+            font=("Segoe UI", 9, "bold"),
+            background=self.COLOR_PURPLE,
+            foreground="#ffffff",
+            padding=5,
+            borderwidth=0,
+            relief="flat",
+            focuscolor="none"
+        )
+        self.style.map("Purple.TButton",
+                       background=[("active", self.COLOR_PURPLE_HOVER), ("pressed", "#5b21b6")])
+
+        # Danger Button (Crimson Red)
         self.style.configure(
             "Danger.TButton",
             font=("Segoe UI", 9, "bold"),
             background=self.COLOR_DANGER,
             foreground="#ffffff",
-            padding=6,
+            padding=5,
             borderwidth=0,
             relief="flat",
             focuscolor="none"
@@ -201,7 +225,7 @@ class BillingApp:
             font=("Segoe UI", 9, "bold"),
             background=self.COLOR_SECONDARY,
             foreground="#ffffff",
-            padding=6,
+            padding=5,
             borderwidth=0,
             relief="flat",
             focuscolor="none"
@@ -215,63 +239,41 @@ class BillingApp:
             background="#ffffff",
             foreground="#0f172a",
             fieldbackground="#ffffff",
-            rowheight=30,
+            rowheight=28,
             font=("Segoe UI", 9),
             borderwidth=1
-        )
-        self.style.configure(
-            "Treeview",
-            background="#ffffff",
-            foreground="#0f172a",
-            fieldbackground="#ffffff",
-            rowheight=30,
-            font=("Segoe UI", 9),
-            borderwidth=1
-        )
-        self.style.configure(
-            "Treeview.Heading",
-            background="#1e293b",
-            foreground="#ffffff",
-            font=("Segoe UI", 9, "bold"),
-            padding=6,
-            relief="flat"
         )
         self.style.configure(
             "Custom.Treeview.Heading",
             background="#1e293b",
             foreground="#ffffff",
             font=("Segoe UI", 9, "bold"),
-            padding=6,
+            padding=5,
             relief="flat"
         )
-        self.style.map("Treeview.Heading",
-                       background=[("active", "#334155")])
         self.style.map("Custom.Treeview.Heading",
                        background=[("active", "#334155")])
         self.style.map("Custom.Treeview",
-                       background=[("selected", "#dbeafe")],
-                       foreground=[("selected", "#1e3a8a")])
-        self.style.map("Treeview",
-                       background=[("selected", "#dbeafe")],
+                       background=[("selected", "#bfdbfe")],
                        foreground=[("selected", "#1e3a8a")])
 
     def create_header(self):
-        """Top Brand Header with dark corporate gradient look & invoice pill."""
-        header_frame = tk.Frame(self.root, bg="#0f172a", height=68)
+        """Top Brand Header with corporate gradient look & invoice pill."""
+        header_frame = tk.Frame(self.root, bg="#0f172a", height=60)
         header_frame.pack(side=tk.TOP, fill=tk.X)
 
-        # Bottom accent line (modern Blue-500 border)
+        # Bottom accent line (modern Blue border)
         accent_line = tk.Frame(header_frame, bg="#3b82f6", height=2)
         accent_line.pack(side=tk.BOTTOM, fill=tk.X)
 
         # Left Title Box
         title_box = tk.Frame(header_frame, bg="#0f172a")
-        title_box.pack(side=tk.LEFT, padx=22, pady=10)
+        title_box.pack(side=tk.LEFT, padx=16, pady=8)
 
         main_title = tk.Label(
             title_box,
             text="⚡ আমার হিসাব (Amar Hisab)",
-            font=("Segoe UI", 16, "bold"),
+            font=("Segoe UI", 15, "bold"),
             fg="#f8fafc",
             bg="#0f172a"
         )
@@ -279,21 +281,21 @@ class BillingApp:
 
         subtitle = tk.Label(
             title_box,
-            text="প্রফেশনাল ডিজিটাল বিলিং ও লেজার সফটওয়্যার (Total = [B&W + Color] × দর | Net = Total - জমা)",
-            font=("Segoe UI", 9),
+            text="প্রফেশনাল ডিজিটাল বিলিং ও লেজার | Total = (B&W + Color) × দর | Net = Total - জমা",
+            font=("Segoe UI", 8),
             fg="#94a3b8",
             bg="#0f172a"
         )
         subtitle.pack(anchor="w")
 
         # Right Info Box (Pill card)
-        inv_box = tk.Frame(header_frame, bg="#1e293b", padx=14, pady=6, bd=1, relief="flat")
-        inv_box.pack(side=tk.RIGHT, padx=22, pady=10)
+        inv_box = tk.Frame(header_frame, bg="#1e293b", padx=12, pady=4, bd=1, relief="flat")
+        inv_box.pack(side=tk.RIGHT, padx=16, pady=8)
 
         self.inv_lbl = tk.Label(
             inv_box,
             text=f"ইনভয়েস: {self.invoice_number}",
-            font=("Segoe UI", 10, "bold"),
+            font=("Segoe UI", 9, "bold"),
             fg="#38bdf8",
             bg="#1e293b"
         )
@@ -302,8 +304,8 @@ class BillingApp:
         today_str = datetime.date.today().strftime("%d-%m-%Y")
         date_lbl = tk.Label(
             inv_box,
-            text=f"তারিখ: {today_str}",
-            font=("Segoe UI", 9),
+            text=f"তারিখ: {today_str} | [F5 রিফ্রেশ]",
+            font=("Segoe UI", 8),
             fg="#cbd5e1",
             bg="#1e293b"
         )
@@ -312,73 +314,99 @@ class BillingApp:
     def create_main_container(self):
         """Main Content Area containing all 3 core sections."""
         self.main_container = tk.Frame(self.root, bg="#f8fafc")
-        self.main_container.pack(fill=tk.BOTH, expand=True, padx=15, pady=8)
+        self.main_container.pack(fill=tk.BOTH, expand=True, padx=12, pady=6)
 
     # ==============================================================
     # ১. শীর্ষ অংশ: ক্লায়েন্ট তথ্য ও WhatsApp বকেয়া যোগাযোগ
     # ==============================================================
     def create_top_client_section(self):
-        """Top Section: Client Details, Previous Due, and WhatsApp Button."""
+        """
+        Top Section: 2-Row Compact Grid to eliminate screen overflow.
+        Row 0: Name, WhatsApp, Search, Address, Save Client, In-App Refresh (F5)
+        Row 1: All Clients (Modal), Previous Due Badge, WhatsApp Reminder, Status Badge, Desktop Shortcut
+        """
         client_frame = ttk.LabelFrame(
             self.main_container,
-            text="👤 ১. ক্লায়েন্টের তথ্য ও WhatsApp বকেয়া যোগাযোগ (Client Details & WhatsApp)",
+            text="👤 ১. ক্লায়েন্টের তথ্য ও যোগাযোগ (Client Details & Actions)",
             style="Card.TLabelframe"
         )
-        client_frame.pack(fill=tk.X, pady=(0, 8))
+        client_frame.pack(fill=tk.X, pady=(0, 6))
 
         inner = tk.Frame(client_frame, bg=self.COLOR_CARD)
-        inner.pack(fill=tk.X, padx=5, pady=3)
+        inner.pack(fill=tk.X, padx=8, pady=4)
+
+        # ── ROW 0: Inputs & Primary Action Buttons ────────────────
+        row0 = tk.Frame(inner, bg=self.COLOR_CARD)
+        row0.pack(fill=tk.X, pady=2)
 
         # Client Name
-        lbl_name = ttk.Label(inner, text="গ্রাহকের নাম: *", style="FieldLabel.TLabel")
-        lbl_name.grid(row=0, column=0, padx=(0, 4), pady=4, sticky="w")
-
-        self.entry_client_name = ttk.Entry(inner, width=18, font=("Segoe UI", 10))
-        self.entry_client_name.grid(row=0, column=1, padx=(0, 10), pady=4, sticky="w")
+        ttk.Label(row0, text="গ্রাহকের নাম: *", style="FieldLabel.TLabel").pack(side=tk.LEFT, padx=(0, 4))
+        self.entry_client_name = ttk.Entry(row0, width=17, font=("Segoe UI", 9))
+        self.entry_client_name.pack(side=tk.LEFT, padx=(0, 8))
 
         # WhatsApp Number
-        lbl_whatsapp = ttk.Label(inner, text="WhatsApp নম্বর: *", style="FieldLabel.TLabel")
-        lbl_whatsapp.grid(row=0, column=2, padx=(0, 4), pady=4, sticky="w")
+        ttk.Label(row0, text="WhatsApp নম্বর: *", style="FieldLabel.TLabel").pack(side=tk.LEFT, padx=(0, 4))
+        self.entry_client_whatsapp = ttk.Entry(row0, width=14, font=("Segoe UI", 9))
+        self.entry_client_whatsapp.pack(side=tk.LEFT, padx=(0, 4))
 
-        self.entry_client_whatsapp = ttk.Entry(inner, width=15, font=("Segoe UI", 10))
-        self.entry_client_whatsapp.grid(row=0, column=3, padx=(0, 6), pady=4, sticky="w")
-
-        # Find Client Button
+        # Search / Autofill
         btn_search = ttk.Button(
-            inner,
+            row0,
             text="🔍 খুঁজুন",
             style="Secondary.TButton",
             cursor="hand2",
             command=self.search_or_autofill_client
         )
-        btn_search.grid(row=0, column=4, padx=(0, 10), pady=4)
+        btn_search.pack(side=tk.LEFT, padx=(0, 8))
 
         # Client Address
-        lbl_address = ttk.Label(inner, text="ঠিকানা:", style="FieldLabel.TLabel")
-        lbl_address.grid(row=0, column=5, padx=(0, 4), pady=4, sticky="w")
-
-        self.entry_client_address = ttk.Entry(inner, width=16, font=("Segoe UI", 10))
-        self.entry_client_address.grid(row=0, column=6, padx=(0, 10), pady=4, sticky="w")
+        ttk.Label(row0, text="ঠিকানা:", style="FieldLabel.TLabel").pack(side=tk.LEFT, padx=(0, 4))
+        self.entry_client_address = ttk.Entry(row0, width=15, font=("Segoe UI", 9))
+        self.entry_client_address.pack(side=tk.LEFT, padx=(0, 8))
 
         # Save Client Button
         btn_save_client = ttk.Button(
-            inner,
+            row0,
             text="💾 ক্লায়েন্ট সেভ",
             style="Success.TButton",
             cursor="hand2",
             command=self.save_client_action
         )
-        btn_save_client.grid(row=0, column=7, padx=(0, 10), pady=4)
+        btn_save_client.pack(side=tk.LEFT, padx=(0, 6))
 
-        # Previous Due Badge for loaded client
-        due_badge_frame = tk.Frame(inner, bg="#fef2f2", padx=10, pady=3, bd=1, relief="solid")
-        due_badge_frame.grid(row=0, column=8, padx=(0, 10), pady=4)
+        # IN-APP REFRESH BUTTON (Requirement 6)
+        btn_refresh = ttk.Button(
+            row0,
+            text="🔄 রিফ্রেশ (F5)",
+            style="Primary.TButton",
+            cursor="hand2",
+            command=self.refresh_all_action
+        )
+        btn_refresh.pack(side=tk.LEFT, padx=(0, 4))
+
+        # ── ROW 1: Client Browser, Due Badge, WhatsApp, Desktop Shortcut ────
+        row1 = tk.Frame(inner, bg=self.COLOR_CARD)
+        row1.pack(fill=tk.X, pady=(4, 2))
+
+        # ALL CLIENTS MODAL BUTTON (Requirement 2)
+        btn_all_clients = ttk.Button(
+            row1,
+            text="👥 সব ক্লায়েন্ট তালিকা",
+            style="Secondary.TButton",
+            cursor="hand2",
+            command=self.open_client_browser
+        )
+        btn_all_clients.pack(side=tk.LEFT, padx=(0, 8))
+
+        # Previous Due Badge
+        due_badge_frame = tk.Frame(row1, bg="#fee2e2", padx=8, pady=2, bd=1, relief="solid")
+        due_badge_frame.pack(side=tk.LEFT, padx=(0, 8))
 
         tk.Label(
             due_badge_frame,
             text="আগের বাকি (Due):",
             font=("Segoe UI", 9, "bold"),
-            bg="#fef2f2",
+            bg="#fee2e2",
             fg="#991b1b"
         ).pack(side=tk.LEFT, padx=(0, 4))
 
@@ -386,152 +414,160 @@ class BillingApp:
             due_badge_frame,
             text="৳ 0.00",
             font=("Segoe UI", 10, "bold"),
-            bg="#fef2f2",
+            bg="#fee2e2",
             fg="#dc2626"
         )
         self.lbl_client_previous_due.pack(side=tk.LEFT)
 
-        # Prominent 'WhatsApp-এ মেসেজ পাঠান' Button
+        # WhatsApp Reminder Button
         self.btn_whatsapp_top = ttk.Button(
-            inner,
-            text="💬 WhatsApp-এ মেসেজ পাঠান",
+            row1,
+            text="💬 WhatsApp-এ বকেয়া পাঠান",
             style="WhatsApp.TButton",
             cursor="hand2",
             command=self.send_whatsapp_reminder
         )
-        self.btn_whatsapp_top.grid(row=0, column=9, padx=(0, 8), pady=4)
+        self.btn_whatsapp_top.pack(side=tk.LEFT, padx=(0, 8))
 
         # Client Status Badge
         self.lbl_client_status = tk.Label(
-            inner,
+            row1,
             text="নতুন ক্লায়েন্ট",
             font=("Segoe UI", 9, "bold"),
             fg="#475569",
             bg="#f1f5f9",
-            padx=10,
-            pady=4,
+            padx=8,
+            pady=3,
             relief="solid",
-            bd=0
+            bd=1
         )
-        self.lbl_client_status.grid(row=0, column=10, padx=4, pady=4)
+        self.lbl_client_status.pack(side=tk.LEFT, padx=(0, 8))
+
+        # DESKTOP SHORTCUT BUTTON (Requirement 5)
+        btn_shortcut = ttk.Button(
+            row1,
+            text="🖥️ ডেস্কটপে শর্টকাট",
+            style="Secondary.TButton",
+            cursor="hand2",
+            command=self.create_desktop_shortcut_action
+        )
+        btn_shortcut.pack(side=tk.RIGHT, padx=4)
 
     # ==============================================================
     # ২. মাঝের অংশ: ডেটা এন্ট্রি ফর্ম ও নিখুঁত হিসাব
     # ==============================================================
     def create_middle_entry_section(self):
         """
-        Middle Section: 5 Entry Boxes with Live Calculation Preview:
-        Total = (B&W + Color) * Rate  (0 if Total Pages == 0)
-        Net   = Total - Deposit
-        New Due = Previous Due + Net
+        Middle Section: Compact 2-Row Layout.
+        Row 0: 5 Entry fields (তারিখ, B&W, Color, দর, জমা)
+        Row 1: Live Calculations (Total, Net, New Due) + Save (Enter) + Reset (Esc)
         """
         entry_frame = ttk.LabelFrame(
             self.main_container,
             text="📝 ২. ডেটা এন্ট্রি ফর্ম [Total = (B&W + Color) × দর | Net = Total - জমা | New Due = আগের বাকি + Net]",
             style="Card.TLabelframe"
         )
-        entry_frame.pack(fill=tk.X, pady=(0, 8))
+        entry_frame.pack(fill=tk.X, pady=(0, 6))
 
         inner = tk.Frame(entry_frame, bg=self.COLOR_CARD)
-        inner.pack(fill=tk.X, padx=5, pady=5)
+        inner.pack(fill=tk.X, padx=8, pady=4)
+
+        # ── ROW 0: The 5 Input Fields ─────────────────────────────
+        row0 = tk.Frame(inner, bg=self.COLOR_CARD)
+        row0.pack(fill=tk.X, pady=2)
 
         # Field 1: ১. তারিখ (Date)
-        lbl_date = ttk.Label(inner, text="১. তারিখ:", style="FieldLabel.TLabel")
-        lbl_date.grid(row=0, column=0, padx=(0, 4), pady=4, sticky="w")
-
-        self.entry_date = ttk.Entry(inner, width=12, font=("Segoe UI", 10, "bold"))
-        self.entry_date.grid(row=0, column=1, padx=(0, 10), pady=4, sticky="w")
+        ttk.Label(row0, text="১. তারিখ:", style="FieldLabel.TLabel").pack(side=tk.LEFT, padx=(0, 4))
+        self.entry_date = ttk.Entry(row0, width=11, font=("Segoe UI", 9, "bold"))
+        self.entry_date.pack(side=tk.LEFT, padx=(0, 10))
         today_default = datetime.date.today().strftime("%d-%m-%Y")
         self.entry_date.insert(0, today_default)
 
         # Field 2: ২. B&W পেজ (B&W Pages)
-        lbl_bw = ttk.Label(inner, text="২. B&W পেজ:", style="FieldLabel.TLabel")
-        lbl_bw.grid(row=0, column=2, padx=(0, 4), pady=4, sticky="w")
-
-        self.entry_bw_pages = ttk.Entry(inner, width=9, font=("Segoe UI", 10, "bold"))
-        self.entry_bw_pages.grid(row=0, column=3, padx=(0, 10), pady=4, sticky="w")
+        ttk.Label(row0, text="২. B&W পেজ:", style="FieldLabel.TLabel").pack(side=tk.LEFT, padx=(0, 4))
+        self.entry_bw_pages = ttk.Entry(row0, width=8, font=("Segoe UI", 9, "bold"))
+        self.entry_bw_pages.pack(side=tk.LEFT, padx=(0, 10))
         self.entry_bw_pages.insert(0, "0")
         self.entry_bw_pages.bind("<KeyRelease>", self.update_live_calculations)
 
         # Field 3: ৩. Color পেজ (Color Pages)
-        lbl_color = ttk.Label(inner, text="৩. Color পেজ:", style="FieldLabel.TLabel")
-        lbl_color.grid(row=0, column=4, padx=(0, 4), pady=4, sticky="w")
-
-        self.entry_color_pages = ttk.Entry(inner, width=9, font=("Segoe UI", 10, "bold"))
-        self.entry_color_pages.grid(row=0, column=5, padx=(0, 10), pady=4, sticky="w")
+        ttk.Label(row0, text="৩. Color পেজ:", style="FieldLabel.TLabel").pack(side=tk.LEFT, padx=(0, 4))
+        self.entry_color_pages = ttk.Entry(row0, width=8, font=("Segoe UI", 9, "bold"))
+        self.entry_color_pages.pack(side=tk.LEFT, padx=(0, 10))
         self.entry_color_pages.insert(0, "0")
         self.entry_color_pages.bind("<KeyRelease>", self.update_live_calculations)
 
         # Field 4: ৪. দর (Rate)
-        lbl_rate = ttk.Label(inner, text="৪. দর (৳):", style="FieldLabel.TLabel")
-        lbl_rate.grid(row=0, column=6, padx=(0, 4), pady=4, sticky="w")
-
-        self.entry_rate = ttk.Entry(inner, width=9, font=("Segoe UI", 10, "bold"))
-        self.entry_rate.grid(row=0, column=7, padx=(0, 10), pady=4, sticky="w")
+        ttk.Label(row0, text="৪. দর (৳):", style="FieldLabel.TLabel").pack(side=tk.LEFT, padx=(0, 4))
+        self.entry_rate = ttk.Entry(row0, width=8, font=("Segoe UI", 9, "bold"))
+        self.entry_rate.pack(side=tk.LEFT, padx=(0, 10))
         self.entry_rate.insert(0, "2.00")
         self.entry_rate.bind("<KeyRelease>", self.update_live_calculations)
 
         # Field 5: ৫. জমা (Deposit)
-        lbl_dep = ttk.Label(inner, text="৫. জমা (৳):", style="FieldLabel.TLabel")
-        lbl_dep.grid(row=0, column=8, padx=(0, 4), pady=4, sticky="w")
-
-        self.entry_deposit = ttk.Entry(inner, width=10, font=("Segoe UI", 10, "bold"))
-        self.entry_deposit.grid(row=0, column=9, padx=(0, 12), pady=4, sticky="w")
+        ttk.Label(row0, text="৫. জমা (৳):", style="FieldLabel.TLabel").pack(side=tk.LEFT, padx=(0, 4))
+        self.entry_deposit = ttk.Entry(row0, width=9, font=("Segoe UI", 9, "bold"))
+        self.entry_deposit.pack(side=tk.LEFT, padx=(0, 8))
         self.entry_deposit.insert(0, "0")
         self.entry_deposit.bind("<KeyRelease>", self.update_live_calculations)
 
+        # ── ROW 1: Live Calculations Preview & Action Buttons ─────
+        row1 = tk.Frame(inner, bg=self.COLOR_CARD)
+        row1.pack(fill=tk.X, pady=(4, 2))
+
         # Live calculation preview badges
-        preview_box = tk.Frame(inner, bg="#f8fafc", padx=10, pady=4, bd=1, relief="solid")
-        preview_box.grid(row=0, column=10, padx=(0, 8), pady=2)
+        preview_box = tk.Frame(row1, bg="#f8fafc", padx=10, pady=3, bd=1, relief="solid")
+        preview_box.pack(side=tk.LEFT, padx=(0, 12))
 
         # Total Amount Preview
-        tk.Label(preview_box, text="Total:", font=("Segoe UI", 9, "bold"), bg="#f8fafc", fg="#475569").pack(side=tk.LEFT, padx=(2, 2))
-        self.lbl_preview_total = tk.Label(preview_box, text="৳ 0.00", font=("Segoe UI", 10, "bold"), bg="#f8fafc", fg="#2563eb")
-        self.lbl_preview_total.pack(side=tk.LEFT, padx=(0, 8))
+        tk.Label(preview_box, text="Total:", font=("Segoe UI", 8, "bold"), bg="#f8fafc", fg="#475569").pack(side=tk.LEFT, padx=(0, 2))
+        self.lbl_preview_total = tk.Label(preview_box, text="৳ 0.00", font=("Segoe UI", 9, "bold"), bg="#f8fafc", fg="#2563eb")
+        self.lbl_preview_total.pack(side=tk.LEFT, padx=(0, 10))
 
         # Net Amount Preview
-        tk.Label(preview_box, text="Net:", font=("Segoe UI", 9, "bold"), bg="#f8fafc", fg="#475569").pack(side=tk.LEFT, padx=(0, 2))
-        self.lbl_preview_net = tk.Label(preview_box, text="৳ 0.00", font=("Segoe UI", 10, "bold"), bg="#f8fafc", fg="#059669")
-        self.lbl_preview_net.pack(side=tk.LEFT, padx=(0, 8))
+        tk.Label(preview_box, text="Net:", font=("Segoe UI", 8, "bold"), bg="#f8fafc", fg="#475569").pack(side=tk.LEFT, padx=(0, 2))
+        self.lbl_preview_net = tk.Label(preview_box, text="৳ 0.00", font=("Segoe UI", 9, "bold"), bg="#f8fafc", fg="#059669")
+        self.lbl_preview_net.pack(side=tk.LEFT, padx=(0, 10))
 
         # New Due Preview
-        tk.Label(preview_box, text="New Due:", font=("Segoe UI", 9, "bold"), bg="#f8fafc", fg="#475569").pack(side=tk.LEFT, padx=(0, 2))
-        self.lbl_preview_new_due = tk.Label(preview_box, text="৳ 0.00", font=("Segoe UI", 10, "bold"), bg="#f8fafc", fg="#dc2626")
-        self.lbl_preview_new_due.pack(side=tk.LEFT, padx=(0, 2))
+        tk.Label(preview_box, text="New Due:", font=("Segoe UI", 8, "bold"), bg="#f8fafc", fg="#475569").pack(side=tk.LEFT, padx=(0, 2))
+        self.lbl_preview_new_due = tk.Label(preview_box, text="৳ 0.00", font=("Segoe UI", 9, "bold"), bg="#f8fafc", fg="#dc2626")
+        self.lbl_preview_new_due.pack(side=tk.LEFT)
 
-        # Action Buttons
+        # Save Button (Enter)
         btn_add = ttk.Button(
-            inner,
+            row1,
             text="💾 সেভ করুন (Enter)",
             style="Primary.TButton",
             cursor="hand2",
             command=self.save_entry_action
         )
-        btn_add.grid(row=0, column=11, padx=(0, 6), pady=4)
+        btn_add.pack(side=tk.LEFT, padx=(0, 8))
 
+        # Reset Form Button (Esc)
         btn_clear_form = ttk.Button(
-            inner,
+            row1,
             text="🔄 রিসেট (Esc)",
             style="Secondary.TButton",
             cursor="hand2",
             command=self.clear_entry_form
         )
-        btn_clear_form.grid(row=0, column=12, padx=0, pady=4)
+        btn_clear_form.pack(side=tk.LEFT)
 
     # ==============================================================
-    # ৩. নিচের অংশ: টেবিল (Treeview) ও লেজার হিসাব
+    # ৩. নিচের অংশ: টেবিল (Treeview) ও লেজার হিসাব ও বিল একশন
     # ==============================================================
     def create_bottom_table_section(self):
         """Bottom Section: Treeview table displaying ledger records & totals."""
         table_frame = ttk.LabelFrame(
             self.main_container,
-            text="📋 ৩. বিলের আইটেম ও লেজার তালিকা (Ledger Table) - কোনো রো সিলেক্ট করে সরাসরি WhatsApp পাঠান",
+            text="📋 ৩. বিলের আইটেম ও লেজার তালিকা (Ledger Table) - রো সিলেক্ট করে সরাসরি WhatsApp পাঠান",
             style="Card.TLabelframe"
         )
-        table_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
+        table_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 4))
 
         table_container = tk.Frame(table_frame, bg=self.COLOR_CARD)
-        table_container.pack(fill=tk.BOTH, expand=True, padx=5, pady=4)
+        table_container.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
 
         # Scrollbar and Treeview
         scroll_y = ttk.Scrollbar(table_container, orient=tk.VERTICAL)
@@ -560,42 +596,79 @@ class BillingApp:
         self.tree.heading("deposit", text="জমা (৳)", anchor=tk.E)
         self.tree.heading("net_amount", text="Net Amount (৳)", anchor=tk.E)
         self.tree.heading("prev_due", text="আগের বাকি (৳)", anchor=tk.E)
-        self.tree.heading("new_due", text="নতুন Due Amount (৳)", anchor=tk.E)
+        self.tree.heading("new_due", text="নতুন Due (৳)", anchor=tk.E)
 
-        self.tree.column("sl", width=45, anchor=tk.CENTER)
-        self.tree.column("date", width=105, anchor=tk.CENTER)
-        self.tree.column("bw", width=90, anchor=tk.CENTER)
-        self.tree.column("color", width=90, anchor=tk.CENTER)
-        self.tree.column("rate", width=85, anchor=tk.E)
-        self.tree.column("total_amount", width=125, anchor=tk.E)
-        self.tree.column("deposit", width=105, anchor=tk.E)
-        self.tree.column("net_amount", width=125, anchor=tk.E)
-        self.tree.column("prev_due", width=115, anchor=tk.E)
-        self.tree.column("new_due", width=135, anchor=tk.E)
+        self.tree.column("sl", width=40, anchor=tk.CENTER)
+        self.tree.column("date", width=95, anchor=tk.CENTER)
+        self.tree.column("bw", width=80, anchor=tk.CENTER)
+        self.tree.column("color", width=80, anchor=tk.CENTER)
+        self.tree.column("rate", width=75, anchor=tk.E)
+        self.tree.column("total_amount", width=115, anchor=tk.E)
+        self.tree.column("deposit", width=95, anchor=tk.E)
+        self.tree.column("net_amount", width=115, anchor=tk.E)
+        self.tree.column("prev_due", width=110, anchor=tk.E)
+        self.tree.column("new_due", width=125, anchor=tk.E)
 
-        # Alternating row tag colors for sleek readability
-        self.tree.tag_configure("even", background="#ffffff")
-        self.tree.tag_configure("odd", background="#f8fafc")
+        # HIGH-CONTRAST ROW COLOR TAGS (Requirement 4)
+        # 1. due_added (Net Amount > 0: বাকি যোগ হয়েছে) -> Soft Red/Rose background with Bold Dark Red
+        self.tree.tag_configure("due_added", background="#fee2e2", foreground="#991b1b")
+        # 2. payment_made (Net Amount < 0: জমা বেশি / পেমেন্ট পরিশোধ) -> Soft Mint Green background with Bold Dark Green
+        self.tree.tag_configure("payment_made", background="#dcfce7", foreground="#14532d")
+        # 3. zero_even / zero_odd (Net Amount == 0) -> Sleek subtle alternating slate
+        self.tree.tag_configure("zero_even", background="#ffffff", foreground="#334155")
+        self.tree.tag_configure("zero_odd", background="#f1f5f9", foreground="#334155")
 
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # Summary & Actions Bar below Table
-        summary_panel = tk.Frame(table_frame, bg="#f8fafc", padx=12, pady=7, bd=1, relief="solid")
-        summary_panel.pack(fill=tk.X, padx=5, pady=(4, 4))
+        # ── BILL ACTIONS & SUMMARY TOOLBAR (Requirement 3 & 4) ─────────
+        action_toolbar = tk.Frame(table_frame, bg="#f8fafc", padx=8, pady=5, bd=1, relief="solid")
+        action_toolbar.pack(fill=tk.X, padx=6, pady=(3, 3))
 
-        # Left side buttons: Delete Selected, Reset All
-        left_actions = tk.Frame(summary_panel, bg="#f8fafc")
+        # Left: Bill Generation Action Buttons (PDF, Print, WhatsApp Full, Delete, New Bill)
+        left_actions = tk.Frame(action_toolbar, bg="#f8fafc")
         left_actions.pack(side=tk.LEFT)
 
+        # Print / Browser Bill Button
+        btn_print = ttk.Button(
+            left_actions,
+            text="🖨️ প্রিন্ট / ব্রাউজারে বিল",
+            style="Purple.TButton",
+            cursor="hand2",
+            command=self.print_or_view_bill_action
+        )
+        btn_print.pack(side=tk.LEFT, padx=(0, 6))
+
+        # PDF Bill Export Button
+        btn_pdf = ttk.Button(
+            left_actions,
+            text="📄 পিডিএফ (PDF) বিল",
+            style="Primary.TButton",
+            cursor="hand2",
+            command=self.export_pdf_bill_action
+        )
+        btn_pdf.pack(side=tk.LEFT, padx=(0, 6))
+
+        # Full WhatsApp Bill Button
+        btn_wa_full = ttk.Button(
+            left_actions,
+            text="📲 WhatsApp-এ পূর্ণ বিল",
+            style="WhatsApp.TButton",
+            cursor="hand2",
+            command=self.send_full_bill_whatsapp_action
+        )
+        btn_wa_full.pack(side=tk.LEFT, padx=(0, 8))
+
+        # Delete Selected Item
         btn_remove = ttk.Button(
             left_actions,
-            text="🗑️ আইটেম মুছুন (Delete)",
+            text="🗑️ মুছুন (Del)",
             style="Danger.TButton",
             cursor="hand2",
             command=self.delete_selected_item
         )
-        btn_remove.pack(side=tk.LEFT, padx=(0, 10))
+        btn_remove.pack(side=tk.LEFT, padx=(0, 6))
 
+        # New Bill Button
         btn_reset_bill = ttk.Button(
             left_actions,
             text="📄 নতুন বিল (Ctrl+N)",
@@ -605,67 +678,63 @@ class BillingApp:
         )
         btn_reset_bill.pack(side=tk.LEFT)
 
-        # Right side: Summary stats, WhatsApp button & Save Invoice
-        right_totals = tk.Frame(summary_panel, bg="#f8fafc")
+        # Right: Colored Summary Cards & Save Invoice Button
+        right_totals = tk.Frame(action_toolbar, bg="#f8fafc")
         right_totals.pack(side=tk.RIGHT)
 
-        # Total Bill
-        tk.Label(right_totals, text="সর্বমোট বিল:", font=("Segoe UI", 10), bg="#f8fafc").grid(row=0, column=0, padx=4, sticky="e")
-        self.lbl_subtotal = tk.Label(right_totals, text="৳ 0.00", font=("Segoe UI", 10, "bold"), bg="#f8fafc", fg="#1e293b")
-        self.lbl_subtotal.grid(row=0, column=1, padx=(2, 12), sticky="w")
+        # Card 1: Total Bill (Soft Blue)
+        card_total = tk.Frame(right_totals, bg="#eff6ff", padx=6, pady=2, bd=1, relief="solid")
+        card_total.pack(side=tk.LEFT, padx=(0, 6))
+        tk.Label(card_total, text="মোট বিল:", font=("Segoe UI", 8, "bold"), bg="#eff6ff", fg="#1e40af").pack(side=tk.LEFT, padx=(0, 2))
+        self.lbl_subtotal = tk.Label(card_total, text="৳ 0.00", font=("Segoe UI", 9, "bold"), bg="#eff6ff", fg="#1d4ed8")
+        self.lbl_subtotal.pack(side=tk.LEFT)
 
-        # Total Deposit
-        tk.Label(right_totals, text="মোট জমা:", font=("Segoe UI", 10), bg="#f8fafc").grid(row=0, column=2, padx=4, sticky="e")
-        self.lbl_total_deposit_stat = tk.Label(right_totals, text="৳ 0.00", font=("Segoe UI", 10, "bold"), bg="#f8fafc", fg="#059669")
-        self.lbl_total_deposit_stat.grid(row=0, column=3, padx=(2, 12), sticky="w")
+        # Card 2: Total Deposit (Soft Green)
+        card_dep = tk.Frame(right_totals, bg="#f0fdf4", padx=6, pady=2, bd=1, relief="solid")
+        card_dep.pack(side=tk.LEFT, padx=(0, 6))
+        tk.Label(card_dep, text="মোট জমা:", font=("Segoe UI", 8, "bold"), bg="#f0fdf4", fg="#166534").pack(side=tk.LEFT, padx=(0, 2))
+        self.lbl_total_deposit_stat = tk.Label(card_dep, text="৳ 0.00", font=("Segoe UI", 9, "bold"), bg="#f0fdf4", fg="#15803d")
+        self.lbl_total_deposit_stat.pack(side=tk.LEFT)
 
-        # Current Total Due
-        tk.Label(right_totals, text="সর্বশেষ Due Amount:", font=("Segoe UI", 11, "bold"), bg="#f8fafc", fg="#dc2626").grid(row=0, column=4, padx=4, sticky="e")
-        self.lbl_total_due_stat = tk.Label(right_totals, text="৳ 0.00", font=("Segoe UI", 11, "bold"), bg="#f8fafc", fg="#dc2626")
-        self.lbl_total_due_stat.grid(row=0, column=5, padx=(2, 16), sticky="w")
+        # Card 3: Latest Due (Soft Red)
+        card_due = tk.Frame(right_totals, bg="#fef2f2", padx=6, pady=2, bd=1, relief="solid")
+        card_due.pack(side=tk.LEFT, padx=(0, 8))
+        tk.Label(card_due, text="সর্বশেষ Due:", font=("Segoe UI", 8, "bold"), bg="#fef2f2", fg="#991b1b").pack(side=tk.LEFT, padx=(0, 2))
+        self.lbl_total_due_stat = tk.Label(card_due, text="৳ 0.00", font=("Segoe UI", 10, "bold"), bg="#fef2f2", fg="#dc2626")
+        self.lbl_total_due_stat.pack(side=tk.LEFT)
 
-        # WhatsApp Button (Bottom Location)
-        btn_whatsapp_bottom = ttk.Button(
-            right_totals,
-            text="💬 WhatsApp-এ মেসেজ পাঠান",
-            style="WhatsApp.TButton",
-            cursor="hand2",
-            command=self.send_whatsapp_reminder
-        )
-        btn_whatsapp_bottom.grid(row=0, column=6, padx=(0, 6))
-
-        # Save Complete Invoice
+        # Save Complete Invoice Snapshot
         btn_save_inv = ttk.Button(
             right_totals,
-            text="💾 সম্পূর্ণ বিল সংরক্ষণ (Ctrl+S)",
+            text="💾 সংরক্ষণ (Ctrl+S)",
             style="Success.TButton",
             cursor="hand2",
             command=self.save_invoice_action
         )
-        btn_save_inv.grid(row=0, column=7, padx=4)
+        btn_save_inv.pack(side=tk.LEFT)
 
     def create_status_bar(self):
         """Bottom-most status bar for system telemetry."""
-        status_bar = tk.Frame(self.root, bg="#e2e8f0", height=26)
+        status_bar = tk.Frame(self.root, bg="#e2e8f0", height=24)
         status_bar.pack(side=tk.BOTTOM, fill=tk.X)
 
         self.status_left = tk.Label(
             status_bar,
-            text="🟢 ডাটাবেস প্রস্তুত (SQLite Connected: amar_hisab.db) | হিসাব ইঞ্জিন সক্রিয়",
-            font=("Segoe UI", 9),
+            text="🟢 ডাটাবেস প্রস্তুত (SQLite Connected: amar_hisab.db) | F5 চেপে যেকোনো সময় রিফ্রেশ করুন",
+            font=("Segoe UI", 8),
             bg="#e2e8f0",
             fg="#047857"
         )
-        self.status_left.pack(side=tk.LEFT, padx=12)
+        self.status_left.pack(side=tk.LEFT, padx=10)
 
         self.status_right = tk.Label(
             status_bar,
             text="আইটেম: 0 টি",
-            font=("Segoe UI", 9),
+            font=("Segoe UI", 8),
             bg="#e2e8f0",
             fg="#475569"
         )
-        self.status_right.pack(side=tk.RIGHT, padx=12)
+        self.status_right.pack(side=tk.RIGHT, padx=10)
 
     # ==============================================================
     # নিখুঁত কার্সর মুভমেন্ট ও কীবোর্ড নেভিগেশন (100% Mouse-Free)
@@ -755,8 +824,11 @@ class BillingApp:
         self.root.bind("<Control-N>", lambda e: self.reset_entire_bill())
         self.root.bind("<Control-w>", lambda e: self.send_whatsapp_reminder())
         self.root.bind("<Control-W>", lambda e: self.send_whatsapp_reminder())
+        self.root.bind("<Control-p>", lambda e: self.print_or_view_bill_action())
+        self.root.bind("<Control-P>", lambda e: self.print_or_view_bill_action())
         self.root.bind("<Delete>", lambda e: self.delete_selected_item())
         self.root.bind("<Escape>", lambda e: self.clear_entry_form())
+        self.root.bind("<F5>", lambda e: self.refresh_all_action())
 
     def on_whatsapp_enter(self):
         """When Enter is pressed in WhatsApp box, lookup client and focus Date."""
@@ -978,26 +1050,38 @@ class BillingApp:
         self.update_live_calculations()
 
     def refresh_treeview(self):
-        """Re-render Treeview rows with sleek alternating row striping."""
+        """
+        Re-render Treeview rows with high-contrast color matching:
+        - due_added (Red) when net_amount > 0 (বাকি যোগ হয়েছে)
+        - payment_made (Green) when net_amount < 0 (জমা/পরিশোধ করা হয়েছে)
+        - zero_even / zero_odd (Slate) when net_amount == 0
+        """
         for row in self.tree.get_children():
             self.tree.delete(row)
 
         for idx, item in enumerate(self.items_list, start=1):
-            tag = "even" if idx % 2 == 0 else "odd"
+            net = float(item.get("net_amount", 0.0))
+            if net > 0:
+                tag = "due_added"
+            elif net < 0:
+                tag = "payment_made"
+            else:
+                tag = "zero_even" if idx % 2 == 0 else "zero_odd"
+
             self.tree.insert(
                 "",
                 tk.END,
                 values=(
                     idx,
-                    item["entry_date"],
-                    item["bw_pages"],
-                    item["color_pages"],
-                    f"{item['rate']:,.2f}",
-                    f"{item['total_amount']:,.2f}",
-                    f"{item['deposit']:,.2f}",
-                    f"{item['net_amount']:,.2f}",
-                    f"{item['previous_due']:,.2f}",
-                    f"{item['new_due']:,.2f}"
+                    item.get("entry_date", ""),
+                    item.get("bw_pages", 0),
+                    item.get("color_pages", 0),
+                    f"{float(item.get('rate', 0)):,.2f}",
+                    f"{float(item.get('total_amount', 0)):,.2f}",
+                    f"{float(item.get('deposit', 0)):,.2f}",
+                    f"{net:+,.2f}",
+                    f"{float(item.get('previous_due', 0)):,.2f}",
+                    f"{float(item.get('new_due', 0)):,.2f}"
                 ),
                 tags=(tag,)
             )
@@ -1052,17 +1136,17 @@ class BillingApp:
             row_due = record.get("new_due", 0.0)
             self.lbl_client_previous_due.config(text=f"৳ {row_due:,.2f}")
             self.status_left.config(
-                text=f"📌 সিলেক্টেড রো SL-{item_vals[0]}: বকেয়া ৳ {row_due:,.2f} | WhatsApp-এ পাঠানোর জন্য প্রস্তুত",
+                text=f"📌 সিলেক্টেড রো SL-{item_vals[0]}: বকেয়া ৳ {row_due:,.2f} | একশন নেওয়ার জন্য প্রস্তুত",
                 fg="#1e40af"
             )
 
     def recalculate_totals(self):
         """Recalculate total bill, deposits, and latest due."""
-        total_bill = sum(item["total_amount"] for item in self.items_list)
-        total_deposit = sum(item["deposit"] for item in self.items_list)
+        total_bill = sum(float(item.get("total_amount", 0.0)) for item in self.items_list)
+        total_deposit = sum(float(item.get("deposit", 0.0)) for item in self.items_list)
 
         if self.items_list:
-            latest_due = self.items_list[-1]["new_due"]
+            latest_due = float(self.items_list[-1].get("new_due", 0.0))
         else:
             latest_due = self.current_client_previous_due
 
@@ -1071,7 +1155,318 @@ class BillingApp:
         self.lbl_total_due_stat.config(text=f"৳ {latest_due:,.2f}")
 
     # ==============================================================
-    # WhatsApp মেসেজ অটোমেশন (pywhatkit ইন্টিগ্রেশন)
+    # ৪. ক্লায়েন্ট ব্রাউজার মডাল (Single-Click Client Load - Req 2)
+    # ==============================================================
+    def open_client_browser(self):
+        """
+        Opens a modern Client Browser modal.
+        SINGLE-CLICK directly on any client row IMMEDIATELY loads that client,
+        their previous due, and their full daily entries ledger into the main view!
+        """
+        browser_win = tk.Toplevel(self.root)
+        browser_win.title("👥 সংরক্ষিত ক্লায়েন্ট তালিকা (Client Browser)")
+        browser_win.geometry("820x520")
+        browser_win.minsize(700, 420)
+        browser_win.configure(bg="#f8fafc")
+        browser_win.transient(self.root)
+        browser_win.grab_set()
+
+        # Top Header & Live Filter Box
+        top_bar = tk.Frame(browser_win, bg="#0f172a", padx=14, pady=10)
+        top_bar.pack(fill=tk.X)
+
+        tk.Label(
+            top_bar,
+            text="👥 সংরক্ষিত ক্লায়েন্ট তালিকা",
+            font=("Segoe UI", 12, "bold"),
+            fg="#f8fafc",
+            bg="#0f172a"
+        ).pack(side=tk.LEFT)
+
+        tk.Label(
+            top_bar,
+            text="(যেকোনো ক্লায়েন্টের গায়ে একবার চাপ দিলেই তার সকল হিসাব লোড হয়ে যাবে)",
+            font=("Segoe UI", 9),
+            fg="#94a3b8",
+            bg="#0f172a"
+        ).pack(side=tk.LEFT, padx=10)
+
+        # Filter / Search bar
+        search_frame = tk.Frame(browser_win, bg="#ffffff", padx=14, pady=8, bd=1, relief="solid")
+        search_frame.pack(fill=tk.X, padx=12, pady=(10, 6))
+
+        tk.Label(
+            search_frame,
+            text="🔍 নাম বা নম্বর দিয়ে খুঁজুন:",
+            font=("Segoe UI", 9, "bold"),
+            bg="#ffffff",
+            fg="#334155"
+        ).pack(side=tk.LEFT, padx=(0, 6))
+
+        search_var = tk.StringVar()
+        search_entry = ttk.Entry(search_frame, textvariable=search_var, width=28, font=("Segoe UI", 10))
+        search_entry.pack(side=tk.LEFT, padx=(0, 10))
+
+        count_lbl = tk.Label(
+            search_frame,
+            text="মোট ক্লায়েন্ট: ০ জন",
+            font=("Segoe UI", 9),
+            bg="#ffffff",
+            fg="#64748b"
+        )
+        count_lbl.pack(side=tk.RIGHT)
+
+        # Clients Table
+        table_box = tk.Frame(browser_win, bg="#ffffff")
+        table_box.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 8))
+
+        scroll_y = ttk.Scrollbar(table_box, orient=tk.VERTICAL)
+        scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+
+        cols = ("id", "name", "whatsapp", "address", "due_balance")
+        tree_clients = ttk.Treeview(
+            table_box,
+            columns=cols,
+            show="headings",
+            style="Custom.Treeview",
+            yscrollcommand=scroll_y.set
+        )
+        scroll_y.config(command=tree_clients.yview)
+
+        tree_clients.heading("id", text="ID", anchor=tk.CENTER)
+        tree_clients.heading("name", text="গ্রাহকের নাম", anchor=tk.W)
+        tree_clients.heading("whatsapp", text="WhatsApp নম্বর", anchor=tk.CENTER)
+        tree_clients.heading("address", text="ঠিকানা", anchor=tk.W)
+        tree_clients.heading("due_balance", text="বকেয়া ব্যালেন্স (Due ৳)", anchor=tk.E)
+
+        tree_clients.column("id", width=50, anchor=tk.CENTER)
+        tree_clients.column("name", width=190, anchor=tk.W)
+        tree_clients.column("whatsapp", width=140, anchor=tk.CENTER)
+        tree_clients.column("address", width=180, anchor=tk.W)
+        tree_clients.column("due_balance", width=140, anchor=tk.E)
+
+        tree_clients.tag_configure("even", background="#ffffff")
+        tree_clients.tag_configure("odd", background="#f8fafc")
+        tree_clients.tag_configure("due", background="#fee2e2", foreground="#991b1b")
+
+        tree_clients.pack(fill=tk.BOTH, expand=True)
+
+        all_clients_data = []
+
+        def load_table(query=""):
+            for row in tree_clients.get_children():
+                tree_clients.delete(row)
+
+            q = query.lower().strip()
+            count = 0
+            for idx, c in enumerate(all_clients_data):
+                c_name = str(c.get("name", "")).lower()
+                c_phone = str(c.get("whatsapp", "")).lower()
+                if q and (q not in c_name and q not in c_phone):
+                    continue
+
+                count += 1
+                due_val = float(c.get("due_balance", 0.0))
+                tag = "due" if due_val > 0 else ("even" if idx % 2 == 0 else "odd")
+
+                tree_clients.insert(
+                    "",
+                    tk.END,
+                    values=(
+                        c["id"],
+                        c["name"],
+                        c["whatsapp"],
+                        c.get("address", "") or "—",
+                        f"৳ {due_val:,.2f}"
+                    ),
+                    tags=(tag,)
+                )
+            count_lbl.config(text=f"প্রদর্শিত: {count} জন")
+
+        def refresh_clients_data():
+            nonlocal all_clients_data
+            all_clients_data = database.get_all_clients()
+            load_table(search_var.get())
+
+        search_var.trace_add("write", lambda *args: load_table(search_var.get()))
+
+        # Core Action: Select and Load Client into Main App
+        def select_and_load_client(client_id):
+            client = database.get_client_by_id(client_id)
+            if not client:
+                return
+
+            self.current_client_id = client["id"]
+            self.current_client_name = client["name"]
+            self.current_client_whatsapp = client["whatsapp"]
+            self.current_client_address = client.get("address", "") or ""
+
+            # Load into inputs
+            self.entry_client_name.delete(0, tk.END)
+            self.entry_client_name.insert(0, client["name"])
+            self.entry_client_whatsapp.delete(0, tk.END)
+            self.entry_client_whatsapp.insert(0, client["whatsapp"])
+            self.entry_client_address.delete(0, tk.END)
+            self.entry_client_address.insert(0, self.current_client_address)
+
+            # Sync previous due
+            due_val = database.get_client_due(client["id"])
+            self.current_client_previous_due = due_val
+            self.lbl_client_previous_due.config(text=f"৳ {due_val:,.2f}")
+            self.lbl_client_status.config(
+                text=f"ক্লায়েন্ট ID: {client['id']} | বাকি: ৳ {due_val:,.2f}",
+                fg="#1e40af",
+                bg="#dbeafe"
+            )
+
+            # Load all past daily entries for this client into items_list
+            entries = database.get_client_entries(client["id"])
+            self.items_list = entries
+            self.refresh_treeview()
+
+            self.status_left.config(
+                text=f"✅ ক্লায়েন্ট '{client['name']}' লোড হয়েছে! পূর্বের এন্ট্রি: {len(entries)} টি | বকেয়া: ৳ {due_val:,.2f}",
+                fg="#047857"
+            )
+
+            browser_win.destroy()
+            self.set_focus_and_select(self.entry_bw_pages)
+
+        # ── REQUIREMENT 2 FIX: SINGLE CLICK EVENT BINDING ─────────
+        def on_single_click(event):
+            # Identify row clicked
+            row_id = tree_clients.identify_row(event.y)
+            if row_id:
+                tree_clients.selection_set(row_id)
+                vals = tree_clients.item(row_id, "values")
+                if vals:
+                    select_and_load_client(int(vals[0]))
+
+        tree_clients.bind("<ButtonRelease-1>", on_single_click)
+        tree_clients.bind("<Double-1>", on_single_click)
+        tree_clients.bind("<Return>", lambda e: on_single_click(e))
+
+        # Bottom Action Buttons
+        bottom_bar = tk.Frame(browser_win, bg="#f8fafc", padx=12, pady=8)
+        bottom_bar.pack(fill=tk.X)
+
+        def on_btn_load_click():
+            sel = tree_clients.selection()
+            if not sel:
+                messagebox.showinfo("নির্বাচন করুন", "অনুগ্রহ করে তালিকা থেকে একজন ক্লায়েন্ট সিলেক্ট করুন।")
+                return
+            vals = tree_clients.item(sel[0], "values")
+            if vals:
+                select_and_load_client(int(vals[0]))
+
+        btn_load = ttk.Button(
+            bottom_bar,
+            text="✅ ক্লায়েন্ট ও লেজার লোড করুন",
+            style="Success.TButton",
+            cursor="hand2",
+            command=on_btn_load_click
+        )
+        btn_load.pack(side=tk.LEFT, padx=(0, 8))
+
+        btn_close = ttk.Button(
+            bottom_bar,
+            text="❌ বন্ধ করুন",
+            style="Secondary.TButton",
+            cursor="hand2",
+            command=browser_win.destroy
+        )
+        btn_close.pack(side=tk.RIGHT)
+
+        refresh_clients_data()
+        search_entry.focus_set()
+
+    # ==============================================================
+    # ৫. বিল প্রস্তুত ও এক্সপোর্ট (Print, PDF, WhatsApp - Req 3)
+    # ==============================================================
+    def get_current_bill_context(self):
+        """Helper to get current client info and item list for bill generation."""
+        c_name = self.entry_client_name.get().strip() or self.current_client_name or "সাধারণ গ্রাহক"
+        c_phone = self.entry_client_whatsapp.get().strip() or self.current_client_whatsapp or ""
+        c_address = self.entry_client_address.get().strip() or self.current_client_address or ""
+        items = list(self.items_list)
+        return c_name, c_phone, c_address, items
+
+    def print_or_view_bill_action(self):
+        """
+        Generates printable HTML bill and opens it directly in default browser.
+        Browser triggers window.print() dialogue for instant printing or PDF save.
+        """
+        c_name, c_phone, c_address, items = self.get_current_bill_context()
+        if not items:
+            messagebox.showwarning("খালি বিল", "প্রিন্ট করার জন্য কোনো আইটেম যোগ করা নেই।")
+            return
+
+        try:
+            fpath = bill_generator.open_html_bill_in_browser(c_name, c_phone, c_address, items)
+            self.status_left.config(
+                text=f"🖨️ প্রিন্ট ও ব্রাউজার ভিউ প্রস্তুত: {os.path.basename(fpath)}",
+                fg="#047857"
+            )
+        except Exception as e:
+            messagebox.showerror("ত্রুটি", f"বিল তৈরি করতে সমস্যা: {str(e)}")
+
+    def export_pdf_bill_action(self):
+        """
+        Generates professional A4 PDF bill using ReportLab (if installed)
+        or falls back to browser HTML bill for saving as PDF.
+        """
+        c_name, c_phone, c_address, items = self.get_current_bill_context()
+        if not items:
+            messagebox.showwarning("খালি বিল", "পিডিএফ তৈরি করার জন্য কোনো আইটেম যোগ করা নেই।")
+            return
+
+        try:
+            pdf_path = bill_generator.generate_pdf_bill(c_name, c_phone, c_address, items)
+            # Open the generated PDF automatically
+            if sys.platform == "win32":
+                os.startfile(pdf_path)
+            else:
+                webbrowser.open(f"file://{pdf_path}")
+
+            self.status_left.config(
+                text=f"📄 পিডিএফ বিল তৈরি সম্পন্ন: {os.path.basename(pdf_path)}",
+                fg="#047857"
+            )
+            messagebox.showinfo(
+                "পিডিএফ সফল",
+                f"বিলটি সফলভাবে পিডিএফ আকারে সেভ ও ওপেন করা হয়েছে:\n{pdf_path}"
+            )
+        except Exception as e:
+            # Fallback to browser print
+            bill_generator.open_html_bill_in_browser(c_name, c_phone, c_address, items)
+            messagebox.showinfo(
+                "ব্রাউজারে পিডিএফ সেভ করুন",
+                f"রিপোর্ট-ল্যাব সমস্যা: {str(e)}\nবিকল্প হিসেবে ব্রাউজারে বিল খোলা হয়েছে। সেখান থেকে 'Save as PDF' নির্বাচন করুন।"
+            )
+
+    def send_full_bill_whatsapp_action(self):
+        """Opens WhatsApp Web with complete itemized bill breakdown."""
+        c_name, c_phone, _, items = self.get_current_bill_context()
+        if not c_phone:
+            messagebox.showwarning("WhatsApp নম্বর নেই", "অনুগ্রহ করে ক্লায়েন্টের WhatsApp নম্বর দিন।")
+            self.set_focus_and_select(self.entry_client_whatsapp)
+            return
+
+        if not items:
+            messagebox.showwarning("খালি বিল", "বিলে পাঠানোর মতো কোনো আইটেম নেই।")
+            return
+
+        try:
+            formatted = bill_generator.send_full_bill_whatsapp(c_phone, c_name, items)
+            self.status_left.config(
+                text=f"📲 WhatsApp-এ পূর্ণ বিল পাঠানো হচ্ছে ({formatted})...",
+                fg="#047857"
+            )
+        except Exception as e:
+            messagebox.showerror("WhatsApp ত্রুটি", str(e))
+
+    # ==============================================================
+    # ৬. WhatsApp বকেয়া রিমাইন্ডার (pywhatkit ইন্টিগ্রেশন)
     # ==============================================================
     def send_whatsapp_reminder(self):
         """
@@ -1110,7 +1505,7 @@ class BillingApp:
         elif self.current_client_id:
             latest_due = database.get_client_due(self.current_client_id)
         elif self.items_list:
-            latest_due = self.items_list[-1]["new_due"]
+            latest_due = float(self.items_list[-1].get("new_due", 0.0))
         else:
             latest_due = self.current_client_previous_due
 
@@ -1130,24 +1525,23 @@ class BillingApp:
         )
 
         confirm = messagebox.askyesno(
-            "WhatsApp মেসেজ পাঠান (pywhatkit)",
+            "WhatsApp মেসেজ পাঠান",
             f"গ্রাহক: {client_name}\n"
             f"WhatsApp নম্বর: {formatted_phone}\n"
             f"সর্বশেষ বকেয়া (Due): ৳ {latest_due:,.2f}\n\n"
             f"মেসেজ প্রিভিউ:\n-----------------------------------\n"
             f"{msg_preview}\n-----------------------------------\n\n"
-            f"আপনি কি pywhatkit এর মাধ্যমে স্বয়ংক্রিয়ভাবে এই মেসেজটি পাঠাতে চান?"
+            f"আপনি কি এই রিমাইন্ডার মেসেজটি পাঠাতে চান?"
         )
         if not confirm:
             return
 
         # Update telemetry
         self.status_left.config(
-            text=f"⏳ {client_name} ({formatted_phone})-কে pywhatkit দিয়ে WhatsApp মেসেজ পাঠানো হচ্ছে...",
+            text=f"⏳ {client_name} ({formatted_phone})-কে WhatsApp মেসেজ পাঠানো হচ্ছে...",
             fg="#2563eb"
         )
 
-        # Non-blocking callback handlers
         def on_success(msg):
             self.root.after(0, lambda: self.status_left.config(text=f"✅ {msg}", fg="#047857"))
             self.root.after(0, lambda: messagebox.showinfo("WhatsApp সফল", msg))
@@ -1166,7 +1560,60 @@ class BillingApp:
         )
 
     # ==============================================================
-    # ক্লায়েন্ট ও ইনভয়েস হ্যান্ডলিং (Client & Invoice Logic)
+    # ৭. ইন-অ্যাপ রিফ্রেশ বাটন (Requirement 6)
+    # ==============================================================
+    def refresh_all_action(self):
+        """
+        In-App Refresh triggered by Refresh Button or F5 key.
+        Reloads current client's data from SQLite, recalculates totals,
+        and provides instant visual feedback.
+        """
+        if self.current_client_id:
+            # Re-fetch client information
+            client = database.get_client_by_id(self.current_client_id)
+            if client:
+                self.current_client_name = client["name"]
+                self.current_client_whatsapp = client["whatsapp"]
+                self.current_client_address = client.get("address", "") or ""
+                due_val = database.get_client_due(client["id"])
+                self.current_client_previous_due = due_val
+
+                self.lbl_client_previous_due.config(text=f"৳ {due_val:,.2f}")
+                self.lbl_client_status.config(
+                    text=f"ক্লায়েন্ট ID: {client['id']} | বাকি: ৳ {due_val:,.2f}",
+                    fg="#1e40af",
+                    bg="#dbeafe"
+                )
+
+                # Re-load client entries
+                self.items_list = database.get_client_entries(client["id"])
+
+        self.refresh_treeview()
+        self.update_live_calculations()
+
+        self.status_left.config(
+            text="🔄 রিফ্রেশ সম্পন্ন! সকল ডাটা সর্বশেষ অবস্থায় আপডেট করা হয়েছে।",
+            fg="#047857"
+        )
+
+    # ==============================================================
+    # ৮. ডেস্কটপ শর্টকাট একশন (Requirement 5)
+    # ==============================================================
+    def create_desktop_shortcut_action(self):
+        """Creates desktop shortcut for user upon clicking button."""
+        ok = create_desktop_shortcut()
+        if ok:
+            messagebox.showinfo(
+                "শর্টকাট তৈরি সফল",
+                "পিসির ডেস্কটপে 'Amar Hisab' শর্টকাট সফলভাবে তৈরি করা হয়েছে!\n"
+                "এখন ডেস্কটপ থেকেই সরাসরি অ্যাপ চালু করতে পারবেন।"
+            )
+            self.status_left.config(text="🖥️ ডেস্কটপে শর্টকাট সক্রিয় আছে।", fg="#047857")
+        else:
+            messagebox.showerror("ত্রুটি", "শর্টকাট তৈরি করতে ব্যর্থ হয়েছে।")
+
+    # ==============================================================
+    # ৯. ক্লায়েন্ট অনুসন্ধান ও সংরক্ষণ
     # ==============================================================
     def search_or_autofill_client(self, silent: bool = False):
         """Search client in SQLite by WhatsApp number and load Previous Due."""
@@ -1182,6 +1629,7 @@ class BillingApp:
             self.current_client_id = client["id"]
             self.current_client_name = client["name"]
             self.current_client_whatsapp = client["whatsapp"]
+            self.current_client_address = client.get("address", "") or ""
 
             # Load previous due from database
             due_val = database.get_client_due(client["id"])
@@ -1190,7 +1638,7 @@ class BillingApp:
             self.entry_client_name.delete(0, tk.END)
             self.entry_client_name.insert(0, client["name"])
             self.entry_client_address.delete(0, tk.END)
-            self.entry_client_address.insert(0, client["address"] or "")
+            self.entry_client_address.insert(0, self.current_client_address)
 
             self.lbl_client_previous_due.config(text=f"৳ {due_val:,.2f}")
             self.lbl_client_status.config(
@@ -1200,12 +1648,16 @@ class BillingApp:
             )
             self.update_live_calculations()
 
+            # Load past ledger entries
+            self.items_list = database.get_client_entries(client["id"])
+            self.refresh_treeview()
+
             if not silent:
                 messagebox.showinfo(
                     "ক্লায়েন্ট পাওয়া গেছে",
-                    f"গ্রাহক: {client['name']}\nসর্বশেষ বকেয়া (Due): ৳ {due_val:,.2f}"
+                    f"গ্রাহক: {client['name']}\nসর্বশেষ বকেয়া (Due): ৳ {due_val:,.2f}\nমোট আগের হিসাব: {len(self.items_list)} টি"
                 )
-            self.set_focus_and_select(self.entry_date)
+            self.set_focus_and_select(self.entry_bw_pages)
         else:
             self.current_client_id = None
             self.current_client_previous_due = 0.0
@@ -1241,6 +1693,7 @@ class BillingApp:
             self.current_client_id = client_id
             self.current_client_name = name
             self.current_client_whatsapp = whatsapp
+            self.current_client_address = address
 
             due_val = database.get_client_due(client_id)
             self.current_client_previous_due = due_val
@@ -1253,7 +1706,7 @@ class BillingApp:
                 bg="#d1fae5"
             )
             messagebox.showinfo("সফল", f"ক্লায়েন্ট '{name}' সফলভাবে {status_text}!\nআগের বাকি: ৳ {due_val:,.2f}")
-            self.set_focus_and_select(self.entry_date)
+            self.set_focus_and_select(self.entry_bw_pages)
         except Exception as e:
             messagebox.showerror("ডাটাবেস ত্রুটি", f"ক্লায়েন্ট সংরক্ষণে ত্রুটি: {str(e)}")
 
@@ -1290,9 +1743,9 @@ class BillingApp:
                 messagebox.showerror("ক্লায়েন্ট সংরক্ষণ ত্রুটি", str(e))
                 return
 
-        total_bill = sum(item["total_amount"] for item in self.items_list)
-        total_deposit = sum(item["deposit"] for item in self.items_list)
-        latest_due = self.items_list[-1]["new_due"]
+        total_bill = sum(float(item.get("total_amount", 0.0)) for item in self.items_list)
+        total_deposit = sum(float(item.get("deposit", 0.0)) for item in self.items_list)
+        latest_due = float(self.items_list[-1].get("new_due", 0.0))
 
         try:
             database.save_invoice(
@@ -1321,6 +1774,7 @@ class BillingApp:
         self.current_client_id = None
         self.current_client_name = ""
         self.current_client_whatsapp = ""
+        self.current_client_address = ""
         self.current_client_previous_due = 0.0
         self.invoice_number = self.generate_invoice_no()
         self.inv_lbl.config(text=f"ইনভয়েস নং: {self.invoice_number}")
